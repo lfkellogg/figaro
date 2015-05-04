@@ -673,25 +673,25 @@ object ImportanceSmokersBenchmark extends PerformanceTest.OfflineRegressionRepor
       ChartReporter(ChartFactory.TrendHistogram()),
       DsvReporter(','))
   
-  var nextIndex = -1
-  class Person {
+  private var nextIndex = -1
+  private class Person {
     val index = { nextIndex += 1; nextIndex }
     val smokes = Flip(0.6)
   }
   
-  def reset {
+  private def reset {
     nextIndex = -1
     Universe.createNew();
   }
   
   // assign some friends (mults. of 4 & 5)
-  def areFriends(p1: Person, p2: Person) = p1.index < p2.index && p1.index % 4 == 0 && p2.index % 5 == 0
+  private def areFriends(p1: Person, p2: Person) = p1.index < p2.index && p1.index % 4 == 0 && p2.index % 5 == 0
 
   // influence constraint
-  def smokingInfluence(pair: (Boolean, Boolean)) = if (pair._1 == pair._2) 1.5 else 1.0
+  private def smokingInfluence(pair: (Boolean, Boolean)) = if (pair._1 == pair._2) 1.5 else 1.0
   
   // input generation
-  def generateInput(numElements: Int) = {
+  private def generateInput(numElements: Int, samplePercentage: Double) = {
     reset
     
     // get list of people
@@ -707,26 +707,49 @@ object ImportanceSmokersBenchmark extends PerformanceTest.OfflineRegressionRepor
       ^^(p1.smokes, p2.smokes).setConstraint(smokingInfluence)
     }
     
-    (people, people.take((numElements * 0.1).toInt))
+    (people, people.take((numElements * samplePercentage).toInt))
   }
-
-  private val range = Gen.range("NumElements")(25, 100, 25)
-  
-  private val input = for (n <- range) yield generateInput(n)
   
   performance of "Importance" in {
     measure method "probability" in {
-      using(input) config (
+      
+      // scale by number of elements in model
+      val elementRange = Gen.range("NumElements")(25, 100, 25)
+      val elementInput = for (n <- elementRange) yield generateInput(n, 0.1)
+      using(elementInput) config (
         exec.reinstantiation.frequency -> 1,
         exec.independentSamples -> 4
         ) in {
-          case (people, peopleToSample) => {
-            val alg = Importance(100, peopleToSample.map(f => f.smokes): _*)
-            alg.start()
-            println("Probability of person " + peopleToSample(0).index + " smoking: " + alg.probability(peopleToSample(0).smokes, true))
-            alg.kill
-          }
+          case (people, peopleToSample) => runAlgorithm(people, peopleToSample, 100)
       }
+      
+      // scale by number of elements to have available for sampling
+      val percentSampleRange = Gen.range("PercentToSample")(25, 100, 25)
+      val percentSampleInput = for (p <- percentSampleRange) yield generateInput(100, p / 100.0)
+      using(percentSampleInput) config (
+        exec.reinstantiation.frequency -> 1,
+        exec.independentSamples -> 4
+        ) in {
+          case (people, peopleToSample) => runAlgorithm(people, peopleToSample, 100)
+      }
+      
+      // scale by the number of samples to take
+      val numSamplesRange = Gen.range("NumSamples")(50, 200, 50)
+      val numSamplesInput = for (n <- numSamplesRange) yield (generateInput(100, 0.1), n)
+      using(numSamplesInput) config (
+        exec.reinstantiation.frequency -> 1,
+        exec.independentSamples -> 4
+        ) in {
+        case ((people, peopleToSample), n) => runAlgorithm(people, peopleToSample, n)
+      }
+          
     }
+  }
+  
+  private def runAlgorithm(people: List[Person], peopleToSample: List[Person], numSamples: Int) {
+    val alg = Importance(numSamples, peopleToSample.map(f => f.smokes): _*)
+    alg.start
+    val probSmokes = alg.probability(peopleToSample(0).smokes, true)
+    alg.kill
   }
 }
