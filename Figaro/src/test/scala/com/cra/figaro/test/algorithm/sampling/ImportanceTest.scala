@@ -31,6 +31,8 @@ import com.cra.figaro.test.tags.NonDeterministic
 import scala.language.reflectiveCalls
 import org.scalatest.Matchers
 import org.scalatest.{ PrivateMethodTester, WordSpec }
+import org.scalameter.api._
+
 class ImportanceTest extends WordSpec with Matchers with PrivateMethodTester {
 
   "Sampling a value of a single element" should {
@@ -660,4 +662,71 @@ class ImportanceTest extends WordSpec with Matchers with PrivateMethodTester {
     alg.probabilityOfEvidence(evidence) should be(prob +- 0.01)
   }
 
+}
+
+object ImportanceSmokersBenchmark extends PerformanceTest.OfflineRegressionReport {
+  
+  override def reporter = Reporter.Composite(
+      new RegressionReporter(
+          Tester.Accepter(),
+          Historian.ExponentialBackoff()),
+      ChartReporter(ChartFactory.TrendHistogram()),
+      DsvReporter(','))
+  
+  var nextIndex = -1
+  class Person {
+    val index = { nextIndex += 1; nextIndex }
+    val smokes = Flip(0.6)
+  }
+  
+  def reset {
+    nextIndex = -1
+    Universe.createNew();
+  }
+  
+  // assign some friends (mults. of 4 & 5)
+  def areFriends(p1: Person, p2: Person) = p1.index < p2.index && p1.index % 4 == 0 && p2.index % 5 == 0
+
+  // influence constraint
+  def smokingInfluence(pair: (Boolean, Boolean)) = if (pair._1 == pair._2) 1.5 else 1.0
+  
+  // input generation
+  def generateInput(numElements: Int) = {
+    reset
+    
+    // get list of people
+    val people = List.fill(numElements)(new Person)
+    
+    // observe half of them (with a 60/40 ratio)
+    val secondHalf = people.reverse.take((numElements * 0.5).toInt)
+    secondHalf.take((numElements * 0.2).toInt).foreach { _.smokes.observe(false) }
+    secondHalf.reverse.take((numElements * 0.3).toInt).foreach { _.smokes.observe(true) }
+    
+    // set constraints on friends
+    for (p1 <- people; p2 <- people; if areFriends(p1, p2)) {
+      ^^(p1.smokes, p2.smokes).setConstraint(smokingInfluence)
+    }
+    
+    (people, people.take((numElements * 0.1).toInt))
+  }
+
+  private val range = Gen.range("NumElements")(25, 100, 25)
+  
+  private val input = for (n <- range) yield generateInput(n)
+  
+  performance of "Importance" in {
+    measure method "probability" in {
+      using(input) config (
+        exec.reinstantiation.frequency -> 1,
+        exec.independentSamples -> 4
+        ) in {
+          case (people, peopleToSample) => {
+            val alg = Importance(100, peopleToSample.map(f => f.smokes): _*)
+            alg.start()
+            println("Probability of person " + peopleToSample(0).index + " smoking: " + alg.probability(peopleToSample(0).smokes, true))
+            alg.kill
+          }
+      }
+    }
+  }
 }
