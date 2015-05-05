@@ -664,34 +664,49 @@ class ImportanceTest extends WordSpec with Matchers with PrivateMethodTester {
 
 }
 
-object ImportanceSmokersBenchmark extends PerformanceTest.OfflineRegressionReport {
+/**
+ * A ScalaMeter benchmark for the Importance sampling algorithm
+ */
+object ImportanceBenchmark extends PerformanceTest.OfflineRegressionReport {
   
+  /** ScalaMeter reporter **/
   override def reporter = Reporter.Composite(
       new RegressionReporter(
           Tester.Accepter(),
           Historian.ExponentialBackoff()),
       ChartReporter(ChartFactory.TrendHistogram()),
       DsvReporter(','))
+      
+  /** ScalaMeter executor (faster but less consistent than SeparateJvmsExecutor) **/
+  override def executor: Executor = LocalExecutor(warmer, aggregator, measurer)
   
-  private var nextIndex = -1
+  /** ScalaMeter configuration **/
+  val configParams = Array(
+      exec.reinstantiation.frequency -> 1,
+      exec.independentSamples -> 4
+  )
+  
+  /** A person, who may smoke or not smoke **/
   private class Person {
     val index = { nextIndex += 1; nextIndex }
     val smokes = Flip(0.6)
   }
+  private var nextIndex = -1
   
+  /** Reset for new test **/
   private def reset {
     nextIndex = -1
     Universe.createNew();
   }
   
-  // assign some friends (mults. of 4 & 5)
+  /** Assign some friends (mults. of 4 & 5) **/
   private def areFriends(p1: Person, p2: Person) = p1.index < p2.index && p1.index % 4 == 0 && p2.index % 5 == 0
 
-  // influence constraint
+  /** Influence constraint **/
   private def smokingInfluence(pair: (Boolean, Boolean)) = if (pair._1 == pair._2) 1.5 else 1.0
   
-  // input generation
-  private def generateInput(numElements: Int, samplePercentage: Double) = {
+  /** Smoking input generation **/
+  private def generateSmokingInput(numElements: Int, samplePercentage: Double) = {
     reset
     
     // get list of people
@@ -707,49 +722,67 @@ object ImportanceSmokersBenchmark extends PerformanceTest.OfflineRegressionRepor
       ^^(p1.smokes, p2.smokes).setConstraint(smokingInfluence)
     }
     
-    (people, people.take((numElements * samplePercentage).toInt))
+    val peopleToSample = people.take((numElements * samplePercentage).toInt)
+    (people, peopleToSample)
   }
   
-  performance of "Importance" in {
-    measure method "probability" in {
-      
-      // scale by number of elements in model
-      val elementRange = Gen.range("NumElements")(25, 100, 25)
-      val elementInput = for (n <- elementRange) yield generateInput(n, 0.1)
-      using(elementInput) config (
-        exec.reinstantiation.frequency -> 1,
-        exec.independentSamples -> 4
-        ) in {
-          case (people, peopleToSample) => runAlgorithm(people, peopleToSample, 100)
-      }
-      
-      // scale by number of elements to have available for sampling
-      val percentSampleRange = Gen.range("PercentToSample")(25, 100, 25)
-      val percentSampleInput = for (p <- percentSampleRange) yield generateInput(100, p / 100.0)
-      using(percentSampleInput) config (
-        exec.reinstantiation.frequency -> 1,
-        exec.independentSamples -> 4
-        ) in {
-          case (people, peopleToSample) => runAlgorithm(people, peopleToSample, 100)
-      }
-      
-      // scale by the number of samples to take
-      val numSamplesRange = Gen.range("NumSamples")(50, 200, 50)
-      val numSamplesInput = for (n <- numSamplesRange) yield (generateInput(100, 0.1), n)
-      using(numSamplesInput) config (
-        exec.reinstantiation.frequency -> 1,
-        exec.independentSamples -> 4
-        ) in {
-        case ((people, peopleToSample), n) => runAlgorithm(people, peopleToSample, n)
-      }
-          
-    }
-  }
-  
-  private def runAlgorithm(people: List[Person], peopleToSample: List[Person], numSamples: Int) {
+  /** Sample from smoking model **/
+  private def runSmoking(people: List[Person], peopleToSample: List[Person], numSamples: Int) {
     val alg = Importance(numSamples, peopleToSample.map(f => f.smokes): _*)
     alg.start
     val probSmokes = alg.probability(peopleToSample(0).smokes, true)
     alg.kill
+  }
+  
+  /** Generate input for flips test **/
+  private def generateFlipInput(exp: Int, numFlips: Int) = {
+    Universe.createNew()
+    val p = math.pow(10, exp)
+    val elems = List.fill(numFlips)(Flip(p))
+    elems.foreach { _.observe(true) }
+    elems
+  }
+  
+  performance of "Importance" in {
+    
+    measure method "probability" in {
+      
+      // scale by number of elements in model
+      val elementRange = Gen.range("NumElements")(20, 60, 20)
+      val elementInput = for (n <- elementRange) yield generateSmokingInput(n, 0.1)
+      using(elementInput) config (configParams:_*) in {
+        case (people, peopleToSample) => runSmoking(people, peopleToSample, 100)
+      }
+      
+      // scale by number of elements to have available for sampling
+      val percentSampleRange = Gen.range("PercentToSample")(25, 100, 25)
+      val percentSampleInput = for (p <- percentSampleRange) yield generateSmokingInput(40, p / 100.0)
+      using(percentSampleInput) config (configParams:_*) in {
+        case (people, peopleToSample) => runSmoking(people, peopleToSample, 100)
+      }
+      
+      // scale by the number of samples to take
+      val numSamplesRange = Gen.range("NumSamples")(50, 200, 50)
+      val numSamplesInput = for (n <- numSamplesRange) yield (generateSmokingInput(40, 0.1), n)
+      using(numSamplesInput) config (configParams:_*) in {
+        case ((people, peopleToSample), n) => runSmoking(people, peopleToSample, n)
+      }
+    }
+
+    measure method "start" in {
+
+      // scale flip probability, with many flips
+      val flipExp = Gen.range("FlipExp")(-6, -4, 1)
+      val flipParam = for (e <- flipExp) yield generateFlipInput(e, 100)
+      using (flipParam) config (configParams:_*) in { 
+        case elems => Importance(100, elems: _*).start
+      }
+
+      // scale flip probability, with many samples
+      val flipParam2 = for (e <- flipExp) yield generateFlipInput(e, 10)
+      using (flipParam2) config (configParams:_*) in { 
+        case elems => Importance(1000, elems: _*).start
+      }
+    }
   }
 }
